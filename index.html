@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Seismograf Cerdas</title>
+    <!-- Memuat Tailwind CSS v4 Browser Build -->
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <!-- Memuat Font Inter dari Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            -webkit-tap-highlight-color: transparent;
+        }
+        @keyframes screen-shake {
+            0%, 100% { transform: translate(0, 0) rotate(0); }
+            10%, 30%, 50%, 70%, 90% { transform: translate(-2px, 2px) rotate(-1deg); }
+            20%, 40%, 60%, 80% { transform: translate(2px, -2px) rotate(1deg); }
+        }
+        .shake-animation {
+            animation: screen-shake 0.4s linear infinite;
+        }
+        .magnitude-indicator {
+            transition: all 0.2s ease-in-out;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white antialiased">
+
+    <main class="min-h-screen flex flex-col items-center justify-center p-4">
+        <div class="w-full max-w-lg bg-gray-800 border border-gray-700 rounded-2xl shadow-2xl p-6 md:p-8 text-center">
+            
+            <div class="mb-6">
+                <h1 class="text-3xl font-bold text-cyan-400">Seismograf Cerdas</h1>
+                <p class="text-gray-400 mt-2">Mendeteksi guncangan dengan umpan balik cerdas.</p>
+            </div>
+
+            <div class="bg-black rounded-lg overflow-hidden border-2 border-gray-700 shadow-inner">
+                <canvas id="seismographCanvas" class="w-full"></canvas>
+            </div>
+
+            <div class="mt-6">
+                <h2 class="text-lg font-semibold text-gray-300 mb-3">Skala Guncangan (Simulasi)</h2>
+                <div class="grid grid-cols-5 gap-2 text-center text-xs font-semibold">
+                    <div id="m1" class="magnitude-indicator p-2 rounded-lg bg-gray-700 border border-gray-600">M1</div>
+                    <div id="m2" class="magnitude-indicator p-2 rounded-lg bg-gray-700 border border-gray-600">M2</div>
+                    <div id="m3" class="magnitude-indicator p-2 rounded-lg bg-gray-700 border border-gray-600">M3</div>
+                    <div id="m4" class="magnitude-indicator p-2 rounded-lg bg-gray-700 border border-gray-600">M4</div>
+                    <div id="m5" class="magnitude-indicator p-2 rounded-lg bg-gray-700 border border-gray-600">M5+</div>
+                </div>
+                <p id="magnitude-text" class="mt-3 text-xl font-bold text-gray-400 h-7">-</p>
+            </div>
+
+            <div id="status-panel" class="mt-4 bg-gray-700 p-4 rounded-lg">
+                <p class="text-sm text-gray-400">Status</p>
+                <p id="status" class="text-lg font-semibold text-yellow-400">Siap Dimulai</p>
+            </div>
+
+            <div class="mt-8">
+                <button id="startButton" class="w-full bg-cyan-600 hover:bg-cyan-700 text-white font-bold py-3 px-4 rounded-lg transition-all duration-300 transform hover:scale-105 focus:outline-none focus:ring-4 focus:ring-cyan-500/50">
+                    Mulai Deteksi
+                </button>
+            </div>
+            
+        </div>
+    </main>
+
+    <script>
+        // --- Konfigurasi ---
+        const SENSITIVITY = 15;
+        const MAX_DATA_POINTS = 200;
+        const MAGNITUDE_THRESHOLDS = { M5: 6.0, M4: 4.0, M3: 2.5, M2: 1.0, M1: 0.1 };
+        const ALARM_THRESHOLD = MAGNITUDE_THRESHOLDS.M5;
+
+        // --- Elemen DOM ---
+        const canvas = document.getElementById('seismographCanvas');
+        const ctx = canvas.getContext('2d');
+        const startButton = document.getElementById('startButton');
+        const statusEl = document.getElementById('status');
+        const magnitudeTextEl = document.getElementById('magnitude-text');
+        const magIndicators = { m1: document.getElementById('m1'), m2: document.getElementById('m2'), m3: document.getElementById('m3'), m4: document.getElementById('m4'), m5: document.getElementById('m5') };
+
+        // --- State Aplikasi ---
+        let isDetecting = false;
+        let dataPoints = [];
+        let animationFrameId;
+        let isAlarming = false;
+        
+        // --- Audio Context untuk Alarm ---
+        let audioContext;
+        let oscillator;
+        let gainNode;
+
+        function setupAudio() {
+            if (audioContext) return;
+            try {
+                audioContext = new (window.AudioContext || window.webkitAudio_Context)();
+                oscillator = audioContext.createOscillator();
+                gainNode = audioContext.createGain();
+                oscillator.type = 'square';
+                oscillator.frequency.setValueAtTime(800, audioContext.currentTime);
+                gainNode.gain.setValueAtTime(0, audioContext.currentTime);
+                oscillator.connect(gainNode);
+                gainNode.connect(audioContext.destination);
+                oscillator.start();
+            } catch (e) {
+                console.error("Web Audio API tidak didukung.", e);
+            }
+        }
+        
+        function triggerAlarm(on) {
+            if (!audioContext || isAlarming === on) return;
+            isAlarming = on;
+            gainNode.gain.cancelScheduledValues(audioContext.currentTime);
+            if (on) {
+                gainNode.gain.linearRampToValueAtTime(0.5, audioContext.currentTime + 0.1);
+                document.body.classList.add('shake-animation');
+            } else {
+                gainNode.gain.linearRampToValueAtTime(0, audioContext.currentTime + 0.3);
+                document.body.classList.remove('shake-animation');
+            }
+        }
+
+        function getMagnitudeInfo(magnitude) {
+            if (magnitude >= MAGNITUDE_THRESHOLDS.M5) return { level: 'M5+', text: 'BAHAYA', color: 'bg-red-600', id: 'm5' };
+            if (magnitude >= MAGNITUDE_THRESHOLDS.M4) return { level: 'M4', text: 'Kuat', color: 'bg-orange-500', id: 'm4' };
+            if (magnitude >= MAGNITUDE_THRESHOLDS.M3) return { level: 'M3', text: 'Sedang', color: 'bg-yellow-500', id: 'm3' };
+            if (magnitude >= MAGNITUDE_THRESHOLDS.M2) return { level: 'M2', text: 'Ringan', color: 'bg-green-500', id: 'm2' };
+            if (magnitude >= MAGNITUDE_THRESHOLDS.M1) return { level: 'M1', text: 'Lemah', color: 'bg-blue-500', id: 'm1' };
+            return null;
+        }
+
+        function updateMagnitudeDisplay(magnitude) {
+            const info = getMagnitudeInfo(magnitude);
+            for (const key in magIndicators) {
+                magIndicators[key].className = 'magnitude-indicator p-2 rounded-lg bg-gray-700 border border-gray-600';
+            }
+
+            if (info) {
+                magnitudeTextEl.textContent = `${info.level} - ${info.text}`;
+                magnitudeTextEl.className = `mt-3 text-xl font-bold h-7 ${info.color.replace('bg','text')}`;
+                magIndicators[info.id].classList.remove('bg-gray-700');
+                magIndicators[info.id].classList.add(info.color, 'shadow-lg', 'scale-110');
+            } else {
+                magnitudeTextEl.textContent = 'Tenang';
+                magnitudeTextEl.className = 'mt-3 text-xl font-bold h-7 text-gray-400';
+            }
+        }
+
+        function setupCanvas() {
+            const dpr = window.devicePixelRatio || 1;
+            const rect = canvas.getBoundingClientRect();
+            canvas.width = rect.width * dpr;
+            canvas.height = 150 * dpr;
+            ctx.scale(dpr, dpr);
+            ctx.lineWidth = 2;
+            dataPoints = Array(MAX_DATA_POINTS).fill(0);
+        }
+
+        function draw() {
+            const scaledHeight = canvas.height / (window.devicePixelRatio || 1);
+            const scaledWidth = canvas.width / (window.devicePixelRatio || 1);
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.beginPath();
+            ctx.moveTo(0, scaledHeight / 2);
+            ctx.lineTo(scaledWidth, scaledHeight / 2);
+            ctx.strokeStyle = 'rgba(0, 255, 0, 0.2)';
+            ctx.stroke();
+            
+            ctx.beginPath();
+            ctx.strokeStyle = '#00ff00';
+            const sliceWidth = scaledWidth / (MAX_DATA_POINTS - 1);
+            let x = 0;
+
+            for (let i = 0; i < dataPoints.length; i++) {
+                const v = dataPoints[i] / SENSITIVITY;
+                const y = (scaledHeight / 2) - v;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+                x += sliceWidth;
+            }
+            ctx.stroke();
+            animationFrameId = requestAnimationFrame(draw);
+        }
+
+        let motionTimeout;
+        function handleMotion(event) {
+            clearTimeout(motionTimeout); // Hapus timeout karena kita menerima data
+            statusEl.textContent = 'Mendeteksi...';
+            statusEl.classList.replace('text-yellow-400', 'text-green-400');
+            
+            const { x, y, z } = event.acceleration;
+            // Gunakan nullish coalescing (??) untuk menangani nilai null dari sensor
+            const magnitude = Math.sqrt((x??0)**2 + (y??0)**2 + (z??0)**2);
+            
+            dataPoints.push(magnitude * SENSITIVITY);
+            if(dataPoints.length > MAX_DATA_POINTS) {
+                dataPoints.shift();
+            }
+
+            updateMagnitudeDisplay(magnitude);
+            triggerAlarm(magnitude >= ALARM_THRESHOLD);
+        }
+        
+        function stopDetection() {
+            window.removeEventListener('devicemotion', handleMotion);
+            cancelAnimationFrame(animationFrameId);
+            clearTimeout(motionTimeout);
+            triggerAlarm(false);
+            isDetecting = false;
+            statusEl.textContent = 'Tidak Aktif';
+            statusEl.classList.replace('text-green-400', 'text-yellow-400');
+            startButton.textContent = 'Mulai Deteksi';
+            startButton.classList.replace('bg-red-600', 'bg-cyan-600');
+            startButton.disabled = false;
+        }
+
+        async function startDetection() {
+            // 1. Pemeriksaan awal
+            if (!window.DeviceMotionEvent) {
+                statusEl.textContent = 'Error: Sensor Gerak Tidak Didukung';
+                statusEl.classList.add('text-red-500');
+                startButton.disabled = true;
+                return;
+            }
+            if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost') {
+                statusEl.textContent = 'Error: Membutuhkan Koneksi HTTPS';
+                statusEl.classList.add('text-red-500');
+                alert('Untuk keamanan, sensor gerak hanya aktif pada website HTTPS.');
+                startButton.disabled = true;
+                return;
+            }
+
+            setupAudio();
+            startButton.disabled = true;
+            startButton.textContent = 'Meminta Izin...';
+            statusEl.textContent = 'Menunggu Izin Sensor...';
+
+            // 2. Meminta Izin (khususnya untuk iOS)
+            try {
+                if (typeof DeviceMotionEvent.requestPermission === 'function') {
+                    const permissionState = await DeviceMotionEvent.requestPermission();
+                    if (permissionState !== 'granted') {
+                        throw new Error('Izin ditolak oleh pengguna.');
+                    }
+                }
+                
+                // 3. Mulai Mendengarkan Sensor
+                window.addEventListener('devicemotion', handleMotion, { passive: true });
+                isDetecting = true;
+                statusEl.textContent = 'Menunggu Gerakan...';
+                statusEl.classList.replace('text-yellow-400', 'text-green-400');
+                startButton.textContent = 'Hentikan Deteksi';
+                startButton.classList.replace('bg-cyan-600', 'bg-red-600');
+                startButton.disabled = false;
+
+                // Set timeout untuk memeriksa apakah sensor benar-benar mengirim data
+                motionTimeout = setTimeout(() => {
+                    statusEl.textContent = 'Tidak ada sinyal. Coba goyangkan perangkat.';
+                    statusEl.classList.replace('text-green-400', 'text-yellow-400');
+                }, 3000);
+
+                draw();
+            } catch (error) {
+                console.error("Gagal memulai deteksi:", error);
+                statusEl.textContent = `Error: ${error.message}`;
+                statusEl.classList.add('text-red-500');
+                startButton.textContent = 'Gagal Memuat Sensor';
+            }
+        }
+        
+        startButton.addEventListener('click', () => {
+            if (isDetecting) {
+                stopDetection();
+            } else {
+                startDetection();
+            }
+        });
+
+        window.addEventListener('resize', setupCanvas);
+        window.addEventListener('load', () => {
+            setupCanvas();
+            statusEl.textContent = 'Siap Dimulai';
+        });
+
+    </script>
+</body>
+</html>
+
+
+  
